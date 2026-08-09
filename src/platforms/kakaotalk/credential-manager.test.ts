@@ -1,5 +1,6 @@
-import { afterAll, describe, expect, it } from 'bun:test'
+import { afterAll, describe, expect, it, mock } from 'bun:test'
 import { rmSync } from 'node:fs'
+import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { KakaoCredentialManager } from './credential-manager'
@@ -119,6 +120,113 @@ describe('KakaoCredentialManager', () => {
 
       const config = await manager.load()
       expect(config.current_account).toBe('first-account')
+    })
+  })
+
+  describe('refreshAccountTokens', () => {
+    it('atomically updates the access token while retaining an unrotated refresh token', async () => {
+      const manager = setup()
+      const account = makeAccount({ created_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-01T00:00:00.000Z' })
+      await manager.setAccount(account)
+
+      const updated = await manager.refreshAccountTokens('test-account', async () => ({
+        accessToken: 'new-oauth-token',
+        refreshToken: undefined,
+      }))
+
+      expect(updated).toMatchObject({
+        account_id: account.account_id,
+        oauth_token: 'new-oauth-token',
+        refresh_token: account.refresh_token,
+        device_uuid: account.device_uuid,
+        device_type: account.device_type,
+        created_at: account.created_at,
+      })
+      expect(updated.updated_at).not.toBe(account.updated_at)
+      await expect(manager.getAccount('test-account')).resolves.toEqual(updated)
+    })
+
+    it('persists a rotated refresh token', async () => {
+      const manager = setup()
+      await manager.setAccount(makeAccount())
+
+      const updated = await manager.refreshAccountTokens('test-account', async () => ({
+        accessToken: 'new-oauth-token',
+        refreshToken: 'new-refresh-token',
+      }))
+
+      expect(updated.oauth_token).toBe('new-oauth-token')
+      expect(updated.refresh_token).toBe('new-refresh-token')
+    })
+
+    it('shares one refresh operation across concurrent callers for the same account', async () => {
+      const manager = setup()
+      await manager.setAccount(makeAccount())
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const refresher = async () => {
+        await gate
+        return { accessToken: 'shared-oauth-token', refreshToken: 'shared-refresh-token' }
+      }
+      const firstRefresher = mock(refresher)
+      const secondRefresher = mock(refresher)
+
+      const first = manager.refreshAccountTokens('test-account', firstRefresher)
+      const second = manager.refreshAccountTokens('test-account', secondRefresher)
+      await Bun.sleep(1)
+      release()
+
+      const [firstResult, secondResult] = await Promise.all([first, second])
+      expect(firstResult).toEqual(secondResult)
+      expect(firstRefresher.mock.calls.length + secondRefresher.mock.calls.length).toBe(1)
+    })
+
+    it('does not overwrite credentials changed while refresh was in flight', async () => {
+      const manager = setup()
+      const original = makeAccount()
+      await manager.setAccount(original)
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const refresh = manager.refreshAccountTokens('test-account', async () => {
+        await gate
+        return { accessToken: 'stale-refreshed-token' }
+      })
+      await Bun.sleep(1)
+      await manager.setAccount({ ...original, oauth_token: 'manual-login-token', updated_at: new Date().toISOString() })
+      release()
+
+      await expect(refresh).rejects.toMatchObject({ code: 'credential_conflict' })
+      expect((await manager.getAccount('test-account'))?.oauth_token).toBe('manual-login-token')
+    })
+
+    it('keeps the previous complete file when the atomic replacement fails', async () => {
+      const manager = setup()
+      const original = makeAccount()
+      await manager.setAccount(original)
+      ;(manager as unknown as { atomicWrite: () => Promise<void> }).atomicWrite = async () => {
+        throw new Error('simulated rename failure')
+      }
+
+      await expect(
+        manager.refreshAccountTokens('test-account', async () => ({ accessToken: 'must-not-be-visible' })),
+      ).rejects.toThrow('simulated rename failure')
+      await expect(manager.getAccount('test-account')).resolves.toEqual(original)
+    })
+
+    it('preserves credentials file mode 0600 after token rotation', async () => {
+      const manager = setup()
+      await manager.setAccount(makeAccount())
+      await manager.refreshAccountTokens('test-account', async () => ({ accessToken: 'new-oauth-token' }))
+
+      const credentialsPath = join(
+        (manager as unknown as { configDir: string }).configDir,
+        'kakaotalk-credentials.json',
+      )
+      expect((await stat(credentialsPath)).mode & 0o777).toBe(0o600)
     })
   })
 
