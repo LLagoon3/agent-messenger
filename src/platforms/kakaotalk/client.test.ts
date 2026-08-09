@@ -20,6 +20,8 @@ const mockSendTyping = mock(() => Promise.resolve({}))
 const mockClose = mock(() => {})
 const mockOnClose = mock((_handler: () => void) => {})
 const mockOnPush = mock((_handler: (packet: unknown) => void) => {})
+const mockEnsureKakaoAuth = mock(() => Promise.resolve({}))
+const mockRefreshKakaoAuth = mock(() => Promise.resolve({}))
 
 mock.module('./protocol/session', () => ({
   LocoSession: class MockLocoSession {
@@ -41,6 +43,14 @@ mock.module('./protocol/session', () => ({
     onClose = mockOnClose
     onPush = mockOnPush
   },
+}))
+
+mock.module('./ensure-auth', () => ({
+  KakaoAuthRequiredError: class KakaoAuthRequiredError extends Error {
+    readonly code = 'auth_required'
+  },
+  ensureKakaoAuth: mockEnsureKakaoAuth,
+  refreshKakaoAuth: mockRefreshKakaoAuth,
 }))
 
 function makeLong(n: number): { low: number; high: number } {
@@ -65,6 +75,8 @@ function resetAllMocks() {
   mockClose.mockReset()
   mockOnClose.mockReset()
   mockOnPush.mockReset()
+  mockEnsureKakaoAuth.mockReset()
+  mockRefreshKakaoAuth.mockReset()
 }
 
 // LOCO protocol uses plain numbers for chat.c, but Long-like objects for logIds/cursors.
@@ -108,6 +120,26 @@ describe('KakaoTalkClient', () => {
     mockGetChatLogs.mockResolvedValue({ body: { status: 0, chatLogs: [], eof: true } })
     mockGetChatInfo.mockResolvedValue({ body: { l: makeLong(99999) } })
     mockSyncMessages.mockResolvedValue({ body: { status: 0, isOK: true, chatLogs: [] } })
+    mockEnsureKakaoAuth.mockResolvedValue({
+      account_id: 'managed-account',
+      oauth_token: 'expired-access-token',
+      refresh_token: 'refresh-token',
+      user_id: 'user1',
+      device_uuid: 'device1',
+      device_type: 'tablet',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+    })
+    mockRefreshKakaoAuth.mockResolvedValue({
+      account_id: 'managed-account',
+      oauth_token: 'refreshed-access-token',
+      refresh_token: 'rotated-refresh-token',
+      user_id: 'user1',
+      device_uuid: 'device1',
+      device_type: 'tablet',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-02T00:00:00.000Z',
+    })
   })
 
   afterEach(() => {
@@ -2060,6 +2092,74 @@ describe('KakaoTalkClient', () => {
   })
 
   describe('session lifecycle', () => {
+    it('refreshes managed credentials once and retries LOGINLIST on invalid_access_token', async () => {
+      const invalidToken = Object.assign(new Error('KakaoTalk LOGINLIST invalid access token'), {
+        code: 'invalid_access_token',
+        serverStatus: -950,
+      })
+      mockLogin.mockRejectedValueOnce(invalidToken).mockResolvedValueOnce(structuredClone(DEFAULT_LOGIN_RESULT))
+      const client = await new KakaoTalkClient().login(undefined, 'managed-account')
+
+      const chats = await client.getChats()
+
+      expect(chats).toHaveLength(2)
+      expect(mockRefreshKakaoAuth).toHaveBeenCalledTimes(1)
+      expect(mockLogin).toHaveBeenCalledTimes(2)
+      expect(mockLogin.mock.calls[0]?.[0]).toBe('expired-access-token')
+      expect(mockLogin.mock.calls[1]?.[0]).toBe('refreshed-access-token')
+      expect(mockClose).toHaveBeenCalledTimes(1)
+      client.close()
+    })
+
+    it('returns auth_required when managed credential refresh fails', async () => {
+      const invalidToken = Object.assign(new Error('KakaoTalk LOGINLIST invalid access token'), {
+        code: 'invalid_access_token',
+        serverStatus: -950,
+      })
+      mockLogin.mockRejectedValueOnce(invalidToken)
+      mockRefreshKakaoAuth.mockRejectedValueOnce(new Error('safe refresh failure'))
+      const client = await new KakaoTalkClient().login(undefined, 'managed-account')
+
+      let error: unknown
+      try {
+        await client.getChats()
+      } catch (cause) {
+        error = cause
+      }
+
+      expect(error).toMatchObject({ code: 'auth_required', serverStatus: -950 })
+      expect(mockRefreshKakaoAuth).toHaveBeenCalledTimes(1)
+      expect(mockLogin).toHaveBeenCalledTimes(1)
+      client.close()
+    })
+
+    it('does not refresh recursively when the replacement LOGINLIST is also invalid', async () => {
+      const invalidToken = Object.assign(new Error('KakaoTalk LOGINLIST invalid access token'), {
+        code: 'invalid_access_token',
+        serverStatus: -950,
+      })
+      mockLogin.mockRejectedValue(invalidToken)
+      const client = await new KakaoTalkClient().login(undefined, 'managed-account')
+
+      await expect(client.getChats()).rejects.toMatchObject({ code: 'auth_required', serverStatus: -950 })
+      expect(mockRefreshKakaoAuth).toHaveBeenCalledTimes(1)
+      expect(mockLogin).toHaveBeenCalledTimes(2)
+      client.close()
+    })
+
+    it('does not treat other LOGINLIST rejection statuses as refreshable', async () => {
+      const rejected = Object.assign(new Error('KakaoTalk LOGINLIST rejected'), {
+        code: 'login_rejected',
+        serverStatus: -777,
+      })
+      mockLogin.mockRejectedValueOnce(rejected)
+      const client = await new KakaoTalkClient().login(undefined, 'managed-account')
+
+      await expect(client.getChats()).rejects.toMatchObject({ code: 'login_rejected', serverStatus: -777 })
+      expect(mockRefreshKakaoAuth).not.toHaveBeenCalled()
+      client.close()
+    })
+
     it('lazy init: does not call login until first method call', async () => {
       const client = await new KakaoTalkClient().login({ oauthToken: 'token', userId: 'user1', deviceUuid: 'device1' })
       expect(mockLogin).not.toHaveBeenCalled()

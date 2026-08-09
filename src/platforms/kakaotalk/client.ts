@@ -536,6 +536,7 @@ export class KakaoTalkClient {
   private userId: string | null = null
   private deviceUuid: string | null = null
   private deviceType: KakaoDeviceType = 'tablet'
+  private accountId: string | null = null
   private state: SessionState | null = null
   private initPromise: Promise<SessionState> | null = null
   private closed = false
@@ -550,20 +551,20 @@ export class KakaoTalkClient {
     if (credentials) {
       if (!credentials.oauthToken) throw new KakaoTalkError('OAuth token is required', 'missing_token')
       if (!credentials.userId) throw new KakaoTalkError('User ID is required', 'missing_user_id')
-      this.oauthToken = credentials.oauthToken
-      this.userId = credentials.userId
-      this.deviceUuid = credentials.deviceUuid ?? `agent-messenger-${credentials.userId}`
-      this.deviceType = credentials.deviceType ?? 'tablet'
+      this.accountId = null
+      this.applyCredentials(credentials)
       return this
     }
     const { ensureKakaoAuth } = await import('./ensure-auth')
     const account = await ensureKakaoAuth(accountId)
-    return this.login({
+    this.accountId = account.account_id
+    this.applyCredentials({
       oauthToken: account.oauth_token,
       userId: account.user_id,
       deviceUuid: account.device_uuid,
       deviceType: account.device_type,
     })
+    return this
   }
 
   getCredentials(): { oauthToken: string; userId: string; deviceUuid: string; deviceType: KakaoDeviceType } {
@@ -580,6 +581,18 @@ export class KakaoTalkClient {
     if (this.oauthToken === null) {
       throw new KakaoTalkError('Not authenticated. Call .login() first.', 'not_authenticated')
     }
+  }
+
+  private applyCredentials(credentials: {
+    oauthToken: string
+    userId: string
+    deviceUuid?: string
+    deviceType?: KakaoDeviceType
+  }): void {
+    this.oauthToken = credentials.oauthToken
+    this.userId = credentials.userId
+    this.deviceUuid = credentials.deviceUuid ?? `agent-messenger-${credentials.userId}`
+    this.deviceType = credentials.deviceType ?? 'tablet'
   }
 
   private async ensureSession(): Promise<SessionState> {
@@ -660,6 +673,10 @@ export class KakaoTalkClient {
   }
 
   private async connect(): Promise<SessionState> {
+    return this.connectWithAuthRecovery(false)
+  }
+
+  private async connectWithAuthRecovery(refreshAttempted: boolean): Promise<SessionState> {
     const session = new LocoSession()
     session.onPush((packet) => this.dispatchPush(session, packet))
     session.onClose(() => {
@@ -688,6 +705,33 @@ export class KakaoTalkClient {
       return { session, loginResult }
     } catch (error) {
       session.close()
+      if (isLoginResponseError(error) && error.code === 'invalid_access_token' && this.accountId) {
+        if (refreshAttempted) {
+          throw new KakaoTalkError('KakaoTalk authentication must be renewed', 'auth_required', {
+            cause: error,
+            serverStatus: error.serverStatus,
+          })
+        }
+
+        try {
+          const { refreshKakaoAuth } = await import('./ensure-auth')
+          const account = await refreshKakaoAuth(this.accountId)
+          this.applyCredentials({
+            oauthToken: account.oauth_token,
+            userId: account.user_id,
+            deviceUuid: account.device_uuid,
+            deviceType: account.device_type,
+          })
+        } catch (refreshError) {
+          throw new KakaoTalkError('KakaoTalk authentication must be renewed', 'auth_required', {
+            cause: refreshError,
+            serverStatus: error.serverStatus,
+          })
+        }
+
+        return this.connectWithAuthRecovery(true)
+      }
+
       const code = isLoginResponseError(error) ? error.code : 'login_failed'
       throw new KakaoTalkError(error instanceof Error ? error.message : String(error), code, {
         cause: error,
