@@ -73,7 +73,9 @@ describe('refreshKakaoOAuthToken', () => {
 
   it('redacts tokens when the request times out', async () => {
     const fetchImpl = mock(async () => {
-      throw Object.assign(new Error(`timeout ${credentials.accessToken} ${credentials.refreshToken}`), { name: 'AbortError' })
+      throw Object.assign(new Error(`timeout ${credentials.accessToken} ${credentials.refreshToken}`), {
+        name: 'AbortError',
+      })
     })
 
     let error: unknown
