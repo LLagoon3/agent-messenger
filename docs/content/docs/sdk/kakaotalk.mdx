@@ -32,6 +32,12 @@ import { KakaoTalkClient } from 'agent-messenger/kakaotalk'
 const client = await new KakaoTalkClient().login()
 ```
 
+The stored-credential form enables managed token recovery. If LOCO `LOGINLIST` returns `-950`, the SDK performs one OAuth refresh, atomically stores any rotated access/refresh token, creates one fresh session, and retries LOGINLIST once. Missing or rejected refresh credentials surface as `KakaoTalkError` with code `auth_required`.
+
+Passing raw credentials directly does not give the client authority to rewrite a credential store. In that mode an expired token surfaces as `KakaoTalkError` with code `invalid_access_token`, and the caller owns refresh/persistence.
+
+Never log token values, the Authorization header, or raw OAuth response bodies. The exported refresh errors contain only classified codes and safe numeric status metadata.
+
 ### Chat Rooms
 
 ```typescript
@@ -267,6 +273,8 @@ await manager.removeAccount('1234567890')
 // Switch the current account
 await manager.setCurrentAccount('1234567890')
 ```
+
+Credential writes use same-directory temporary files and atomic rename semantics with mode `0o600`. `refreshAccountTokens()` also uses account-scoped singleflight and compare-and-swap protection, so concurrent refresh callers share one request and a manual re-login cannot be overwritten by a stale refresh result.
 
 ## Types
 

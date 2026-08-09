@@ -94,6 +94,20 @@ agent-kakaotalk auth logout
 agent-kakaotalk auth logout --account <account-id>
 ```
 
+`auth status` reports only whether a local credential record exists. It does not open a LOCO session or prove that Kakao still accepts the access token.
+
+### Token Lifecycle and Recovery
+
+Kakao access-token lifetime is not a fixed interval. A token can expire or be revoked by the server even though `auth status` still shows a stored account. Commands detect `LOGINLIST` status `-950`, use the stored refresh token once, atomically rotate the credential file, open one fresh LOCO session, and retry the original login once.
+
+If the refresh token is missing, rejected, or the replacement login is also rejected, the command returns an `auth_required` error instead of repeatedly reconnecting. Recover with:
+
+```bash
+agent-kakaotalk auth login
+```
+
+The login keeps the existing device UUID when possible. Do not paste access tokens, refresh tokens, the credential file, or raw OAuth responses into logs or issue reports.
+
 ## Multi-Account
 
 KakaoTalk supports multiple accounts. Each login stores credentials separately, keyed by user ID.
@@ -303,6 +317,7 @@ Output includes:
 ## Storage
 
 - Credentials stored in `~/.config/agent-messenger/kakaotalk-credentials.json` (0600 permissions)
+- Refreshed access/refresh tokens are replaced with a temporary-file + rename operation, so readers see either the old complete record or the new complete record
 
 ## Limitations
 
@@ -352,6 +367,10 @@ If the passcode expires before you confirm on your phone:
 1. Run `agent-kakaotalk auth login` again — a new passcode will be generated
 2. Confirm the code on your phone within the time limit
 3. The CLI automatically completes login after confirmation
+
+### `auth_required` or `LOGINLIST status=-950`
+
+The access token could not be refreshed, or Kakao rejected the refreshed credential. Run `agent-kakaotalk auth login`, then retry one read-only command such as `agent-kakaotalk chat list`. A process/API health check alone does not validate live Kakao authentication.
 
 ## AI Agent Integration
 
