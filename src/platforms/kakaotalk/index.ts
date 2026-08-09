@@ -1,7 +1,7 @@
 export { KakaoTalkClient, KakaoTalkError } from './client'
 export { classifyKakaoChat } from './chat-classifier'
 export type { KakaoChatKind } from './chat-classifier'
-export { KakaoCredentialManager, CredentialManager } from './credential-manager'
+export { KakaoCredentialError, KakaoCredentialManager, CredentialManager } from './credential-manager'
 export { KakaoTalkListener } from './listener'
 export type { PendingLoginState } from './credential-manager'
 export type {
